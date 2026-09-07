@@ -121,7 +121,11 @@ namespace TeamsCallingBot.Bot
                         {
                             StreamDirections = StreamDirection.Sendrecv,
                             ReceiveColorFormat = VideoColorFormat.NV12,
-                            SupportedSendVideoFormats = new List<VideoFormat> { VideoFormat.NV12_1280x720_30Fps },
+                            SupportedSendVideoFormats = new List<VideoFormat>
+                            {
+                                VideoFormat.NV12_1280x720_15Fps,
+                                VideoFormat.NV12_640x360_15Fps,
+                            },
                         }
                     },
                     new VideoSocketSettings

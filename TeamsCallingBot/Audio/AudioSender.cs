@@ -257,7 +257,7 @@ namespace TeamsCallingBot.Audio
                 using (var ms = new MemoryStream())
                 {
                     synth.Rate = 1; // Natural, clear and energetic tempo
-                    try { synth.SelectVoiceByHints(System.Speech.Synthesis.VoiceGender.Female); } catch { }
+                    SelectConfiguredVoice(synth, this.graphLogger);
                     var format = new System.Speech.AudioFormat.SpeechAudioFormatInfo(SampleRate, System.Speech.AudioFormat.AudioBitsPerSample.Sixteen, System.Speech.AudioFormat.AudioChannel.Mono);
                     synth.SetOutputToAudioStream(ms, format);
                     synth.Speak(text);
@@ -287,11 +287,95 @@ namespace TeamsCallingBot.Audio
             {
                 await PlayChimeAsync(cancellationToken).ConfigureAwait(false);
                 await Task.Delay(400, cancellationToken).ConfigureAwait(false);
-                await SpeakAsync("Hello! Teams AI Assistant is now active and listening to this meeting.", cancellationToken).ConfigureAwait(false);
+                string greeting = TeamsCallingBot.Config.BotOptions.Current?.GreetingText;
+                if (string.IsNullOrWhiteSpace(greeting))
+                {
+                    greeting = "Hello! Teams AI Assistant is now active and listening to this meeting.";
+                }
+                await SpeakAsync(greeting, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
                 this.graphLogger?.Error(ex, "[AudioSender] Error playing greeting.");
+            }
+        }
+
+        private static bool voicesLogged;
+
+        /// <summary>
+        /// Picks the TTS voice: exact Bot:TtsVoiceName if installed, otherwise the first installed
+        /// voice whose culture matches Bot:TtsCulture (default en-IN = Indian English), preferring Bot:TtsVoiceGender.
+        /// </summary>
+        internal static void SelectConfiguredVoice(System.Speech.Synthesis.SpeechSynthesizer synth, IGraphLogger logger)
+        {
+            var options = TeamsCallingBot.Config.BotOptions.Current;
+            string wantedName = options?.TtsVoiceName;
+            string wantedCulture = string.IsNullOrWhiteSpace(options?.TtsCulture) ? "en-IN" : options.TtsCulture;
+            bool wantMale = string.Equals(options?.TtsVoiceGender, "Male", StringComparison.OrdinalIgnoreCase);
+
+            try
+            {
+                var installed = synth.GetInstalledVoices();
+                if (!voicesLogged)
+                {
+                    voicesLogged = true;
+                    foreach (var v in installed)
+                    {
+                        var line = $"[TTS] Installed voice: {v.VoiceInfo.Name} ({v.VoiceInfo.Culture.Name}, {v.VoiceInfo.Gender}, enabled={v.Enabled})";
+                        logger?.Info(line);
+                        Console.WriteLine(">>> " + line);
+                    }
+                }
+
+                if (!string.IsNullOrWhiteSpace(wantedName))
+                {
+                    foreach (var v in installed)
+                    {
+                        if (v.Enabled && string.Equals(v.VoiceInfo.Name, wantedName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            synth.SelectVoice(v.VoiceInfo.Name);
+                            return;
+                        }
+                    }
+
+                    logger?.Warn($"[TTS] Configured voice '{wantedName}' is not installed - falling back to culture match.");
+                }
+
+                System.Speech.Synthesis.InstalledVoice best = null;
+                foreach (var v in installed)
+                {
+                    if (!v.Enabled || !string.Equals(v.VoiceInfo.Culture.Name, wantedCulture, StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    bool isMale = v.VoiceInfo.Gender == System.Speech.Synthesis.VoiceGender.Male;
+                    if (best == null || isMale == wantMale)
+                    {
+                        best = v;
+                        if (isMale == wantMale)
+                        {
+                            break;
+                        }
+                    }
+                }
+
+                if (best != null)
+                {
+                    synth.SelectVoice(best.VoiceInfo.Name);
+                    return;
+                }
+
+                // Last resort: let SAPI pick by hints
+                synth.SelectVoiceByHints(
+                    wantMale ? System.Speech.Synthesis.VoiceGender.Male : System.Speech.Synthesis.VoiceGender.Female,
+                    System.Speech.Synthesis.VoiceAge.Adult,
+                    0,
+                    new System.Globalization.CultureInfo(wantedCulture));
+            }
+            catch (Exception ex)
+            {
+                logger?.Warn($"[TTS] Voice selection failed ({ex.Message}) - using default voice.");
             }
         }
 
