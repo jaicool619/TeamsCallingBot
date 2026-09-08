@@ -1,6 +1,7 @@
 namespace TeamsCallingBot.Config
 {
     using System;
+    using System.Collections.Generic;
     using Microsoft.Extensions.Configuration;
 
     /// <summary>
@@ -57,10 +58,47 @@ namespace TeamsCallingBot.Config
         /// <summary>
         /// Caps how many meetings this VM instance will join at once. Default of 3 matches the
         /// architecture doc's own "~3-4 concurrent meetings per capture VM" estimate for per-speaker
-        /// (unmixed) audio - that number is explicitly marked "needs validation" there, so revisit
-        /// once real throughput is measured on the actual VM hardware.
+        /// <summary>
+        /// Maximum number of concurrent calls this single bot instance handles.
+        /// Configured for testing 5 concurrent meetings at the same time.
         /// </summary>
-        public int MaxConcurrentCalls { get; set; } = 3;
+        public int MaxConcurrentCalls { get; set; } = 5;
+
+        /// <summary>
+        /// List of meeting join URLs to test joining multiple meetings simultaneously (up to MaxConcurrentCalls).
+        /// </summary>
+        public List<string> TestMeetingJoinUrls { get; set; } = new List<string>();
+
+        /// <summary>
+        /// Path to whisper-cli executable (e.g. C:\whisper\whisper-cli.exe).
+        /// </summary>
+        public string WhisperExecutablePath { get; set; } = @"C:\whisper\whisper-cli.exe";
+
+        /// <summary>
+        /// Path to the standard Whisper model (e.g. ggml-base.bin or ggml-small.bin).
+        /// </summary>
+        public string WhisperModelPath { get; set; } = @"C:\whisper\models\ggml-base.bin";
+
+        /// <summary>
+        /// Language mode for Whisper transcription ("auto" for automatic Hindi/English/Hinglish detection).
+        /// </summary>
+        public string WhisperLanguage { get; set; } = "auto";
+
+        /// <summary>
+        /// Prompt context for Whisper to guide vocabulary and enable accurate Hindi, English, and Hinglish transcription.
+        /// </summary>
+        public string WhisperPrompt { get; set; } = "Meeting conversation in English, Hindi, and Hinglish: Namaste, haan, theek hai, okay, right, discuss karte hain.";
+
+        /// <summary>
+        /// Beam size for Whisper decoding (5 = higher accuracy / lower hallucinations).
+        /// </summary>
+        public int WhisperBeamSize { get; set; } = 5;
+
+        /// <summary>
+        /// Master switch to start the bot in muted state (does not speak audio into the meeting,
+        /// while still recording and transcribing via Whisper).
+        /// </summary>
+        public bool StartMuted { get; set; } = true;
 
         /// <summary>
         /// Where recordings/transcripts are written. Point this at wherever Google Drive for Desktop's
@@ -113,13 +151,13 @@ namespace TeamsCallingBot.Config
         // -------------------------------------------------------------------------------------
 
         /// <summary>Speak the greeting (GreetingText) into the meeting once audio send becomes active.</summary>
-        public bool SpeakGreetingOnJoin { get; set; } = true;
+        public bool SpeakGreetingOnJoin { get; set; } = false;
 
         /// <summary>Say a short "Hi &lt;name&gt;" when a human participant joins after the bot.</summary>
-        public bool GreetParticipantsByName { get; set; } = true;
+        public bool GreetParticipantsByName { get; set; } = false;
 
         /// <summary>Speak + post to chat when a participant starts sharing their screen.</summary>
-        public bool AnnounceScreenShare { get; set; } = true;
+        public bool AnnounceScreenShare { get; set; } = false;
 
         public string GreetingText { get; set; } =
             "Hello everyone, I am the AI meeting assistant. I have joined to record this meeting and prepare the minutes.";
@@ -161,6 +199,12 @@ namespace TeamsCallingBot.Config
 
         public CloudRunRelayOptions CloudRunRelay { get; set; } = new CloudRunRelayOptions();
 
+        // -------------------------------------------------------------------------------------
+        // Tata Steel Digital Assistant (TDA) integration
+        // -------------------------------------------------------------------------------------
+
+        public TdaOptions Tda { get; set; } = new TdaOptions();
+
         /// <summary>
         /// Set once at startup (Startup.cs) so static classes without DI access (TranscriptSaver)
         /// can still read config. Deliberately simple - this process only ever loads one BotOptions.
@@ -190,6 +234,16 @@ namespace TeamsCallingBot.Config
             if (options.CloudRunRelay == null)
             {
                 options.CloudRunRelay = new CloudRunRelayOptions();
+            }
+
+            if (options.Tda == null)
+            {
+                options.Tda = new TdaOptions();
+            }
+
+            if (options.TestMeetingJoinUrls == null)
+            {
+                options.TestMeetingJoinUrls = new List<string>();
             }
 
             Current = options;
@@ -232,5 +286,66 @@ namespace TeamsCallingBot.Config
         public bool Enabled { get; set; } = false;
         public string RelayUrl { get; set; } = string.Empty;
         public int RequestTimeoutSeconds { get; set; } = 30;
+    }
+
+    /// <summary>
+    /// Settings for talking to TDA (Tata Steel Digital Assistant): asking it a question so the bot
+    /// can speak the answer into the meeting, and sending it messages via a client-credentials token
+    /// scoped to the "TSL AI" resource. See Tda/TdaTokenProvider.cs and Tda/TdaClient.cs.
+    ///
+    /// DEFAULT-OFF BY DESIGN: every value below is a placeholder - the real base URL, scope and
+    /// endpoint paths are not yet known. Enabled defaults to false so this integration stays completely
+    /// inert - no token requests, no HTTP calls, no behaviour change - on any deployment until someone
+    /// deliberately turns it on with real values. Every call site in CallHandler wraps TDA calls in
+    /// try/catch so a misconfigured or unreachable TDA never affects audio/video recording or the
+    /// existing chat/MoM pipeline.
+    /// </summary>
+    public class TdaOptions
+    {
+        /// <summary>Master on/off switch. Must be explicitly set true - stays off by default.</summary>
+        public bool Enabled { get; set; } = false;
+
+        /// <summary>TDA API base URL, e.g. https://tda.tatasteel.example.com/api. Placeholder - not yet known.</summary>
+        public string BaseUrl { get; set; } = string.Empty;
+
+        /// <summary>
+        /// OAuth token endpoint used to acquire the "TSL AI" scoped token (client-credentials grant),
+        /// e.g. https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token. Placeholder.
+        /// </summary>
+        public string TokenEndpoint { get; set; } = string.Empty;
+
+        /// <summary>
+        /// App (client) id used to request the TSL AI token. Leave blank to reuse Bot:AadAppId if the
+        /// same app registration is authorized for the TDA/TSL AI scope.
+        /// </summary>
+        public string ClientId { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Client secret for the above. Leave blank to reuse Bot:AadAppSecretOrCertThumbprint.
+        /// Never commit a real value here - appsettings.json is .gitignored, same as the other secrets.
+        /// </summary>
+        public string ClientSecret { get; set; } = string.Empty;
+
+        /// <summary>
+        /// The exact "TSL AI" scope string to request, e.g. "api://{tsl-ai-app-id}/.default" or a
+        /// named scope like "api://{tsl-ai-app-id}/Message.Send". Must come from whoever owns the
+        /// TDA/TSL AI app registration - not guessable. Placeholder.
+        /// </summary>
+        public string Scope { get; set; } = string.Empty;
+
+        /// <summary>Endpoint TDA exposes for "ask a question, get a text answer". Placeholder.</summary>
+        public string QueryEndpointPath { get; set; } = "/query";
+
+        /// <summary>Endpoint TDA exposes for "send it a message". Placeholder.</summary>
+        public string MessageEndpointPath { get; set; } = "/message";
+
+        /// <summary>HTTP timeout (seconds) for TDA calls.</summary>
+        public int RequestTimeoutSeconds { get; set; } = 30;
+
+        /// <summary>
+        /// TDA answers are spoken via TTS - cap length so the bot doesn't read out a huge block of
+        /// text into the meeting. Longer answers are truncated with "...".
+        /// </summary>
+        public int MaxSpokenAnswerChars { get; set; } = 600;
     }
 }

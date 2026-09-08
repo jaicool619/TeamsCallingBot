@@ -26,7 +26,7 @@ namespace TeamsCallingBot.Audio
         private CancellationTokenSource currentPlaybackCts;
         private readonly object playbackLock = new object();
 
-        public bool IsMuted { get; set; } = false;
+        public bool IsMuted { get; set; } = true;
         public bool IsAudioSendActive { get; private set; } = false;
         public bool IsSpeaking { get; private set; } = false;
 
@@ -216,6 +216,11 @@ namespace TeamsCallingBot.Audio
         /// </summary>
         public async Task PlayChimeAsync(CancellationToken cancellationToken = default)
         {
+            if (this.IsMuted)
+            {
+                return;
+            }
+
             int durationMs = 800;
             int totalSamples = (SampleRate * durationMs) / 1000;
             var pcm = new byte[totalSamples * 2];
@@ -245,8 +250,13 @@ namespace TeamsCallingBot.Audio
         /// </summary>
         public async Task SpeakAsync(string text, CancellationToken cancellationToken = default)
         {
-            if (string.IsNullOrWhiteSpace(text) || this.audioSocket == null)
+            if (string.IsNullOrWhiteSpace(text) || this.audioSocket == null || this.IsMuted)
             {
+                if (this.IsMuted)
+                {
+                    this.graphLogger?.Info($"[AudioSender] Muted - suppressed speech: \"{text}\"");
+                    Console.WriteLine($">>> [AudioSender] Muted (speech suppressed): \"{text}\"");
+                }
                 return;
             }
 
@@ -283,6 +293,11 @@ namespace TeamsCallingBot.Audio
         /// </summary>
         public async Task PlayGreetingAsync(CancellationToken cancellationToken = default)
         {
+            if (this.IsMuted)
+            {
+                return;
+            }
+
             try
             {
                 await PlayChimeAsync(cancellationToken).ConfigureAwait(false);

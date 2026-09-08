@@ -3,6 +3,7 @@ namespace TeamsCallingBot.Audio
     using System;
     using System.Diagnostics;
     using System.IO;
+    using System.Text;
     using System.Threading.Tasks;
 
     /// <summary>
@@ -18,9 +19,6 @@ namespace TeamsCallingBot.Audio
     /// </summary>
     public static class WhisperTranscriber
     {
-        private const string WhisperExecutablePath = @"C:\whisper\whisper-cli.exe";
-        private const string ModelPath = @"C:\whisper\models\ggml-small.bin";
-
         public static async Task<string> TranscribeAsync(string wavPath)
         {
             if (string.IsNullOrWhiteSpace(wavPath) || !File.Exists(wavPath))
@@ -30,13 +28,38 @@ namespace TeamsCallingBot.Audio
 
             try
             {
-                // Priority 1: If whisper-cli is installed, execute it
-                if (File.Exists(WhisperExecutablePath))
+                var options = TeamsCallingBot.Config.BotOptions.Current;
+                string exePath = ResolveWhisperExe(options?.WhisperExecutablePath);
+                string modelPath = ResolveModelPath(options?.WhisperModelPath);
+                string language = string.IsNullOrWhiteSpace(options?.WhisperLanguage) ? "auto" : options.WhisperLanguage;
+                int beamSize = options?.WhisperBeamSize > 0 ? options.WhisperBeamSize : 5;
+                string prompt = options?.WhisperPrompt ?? "Meeting conversation in English, Hindi, and Hinglish: Namaste, haan, theek hai, okay, right, discuss karte hain.";
+
+                // Priority 1: If whisper-cli and model are present, execute Whisper
+                if (!string.IsNullOrWhiteSpace(exePath) && File.Exists(exePath) &&
+                    !string.IsNullOrWhiteSpace(modelPath) && File.Exists(modelPath))
                 {
+                    Console.WriteLine($">>> [WhisperTranscriber] Transcribing {Path.GetFileName(wavPath)} using standard Whisper model: {Path.GetFileName(modelPath)} (Language: {language}, Beam: {beamSize})");
+
+                    var sbArgs = new StringBuilder();
+                    sbArgs.Append($"-m \"{modelPath}\" -f \"{wavPath}\" -otxt -of \"{wavPath}\"");
+                    if (!string.IsNullOrWhiteSpace(language))
+                    {
+                        sbArgs.Append($" -l {language}");
+                    }
+                    if (beamSize > 1)
+                    {
+                        sbArgs.Append($" -bs {beamSize}");
+                    }
+                    if (!string.IsNullOrWhiteSpace(prompt))
+                    {
+                        sbArgs.Append($" --prompt \"{prompt.Replace("\"", "\\\"")}\"");
+                    }
+
                     var psi = new ProcessStartInfo
                     {
-                        FileName = WhisperExecutablePath,
-                        Arguments = $"-m \"{ModelPath}\" -f \"{wavPath}\" -otxt -of \"{wavPath}\"",
+                        FileName = exePath,
+                        Arguments = sbArgs.ToString(),
                         RedirectStandardOutput = true,
                         RedirectStandardError = true,
                         UseShellExecute = false,
@@ -49,6 +72,11 @@ namespace TeamsCallingBot.Audio
                     }
 
                     var outputTxtPath = wavPath + ".txt";
+                    if (!File.Exists(outputTxtPath))
+                    {
+                        outputTxtPath = Path.ChangeExtension(wavPath, ".txt");
+                    }
+
                     if (File.Exists(outputTxtPath))
                     {
                         var transcribed = File.ReadAllText(outputTxtPath);
@@ -57,6 +85,10 @@ namespace TeamsCallingBot.Audio
                             return transcribed.Trim();
                         }
                     }
+                }
+                else
+                {
+                    Console.WriteLine($">>> [WhisperTranscriber] Whisper binary or standard model not found (target: {options?.WhisperModelPath ?? @"C:\whisper\models\ggml-base.bin"}). Using Windows Speech Recognition.");
                 }
 
                 // Priority 2: Windows System.Speech transcription
@@ -174,6 +206,61 @@ namespace TeamsCallingBot.Audio
             }
 
             return tcs.Task;
+        }
+
+        private static string ResolveWhisperExe(string configured)
+        {
+            if (!string.IsNullOrWhiteSpace(configured) && File.Exists(configured))
+            {
+                return configured;
+            }
+
+            var candidates = new[]
+            {
+                @"C:\whisper\whisper-cli.exe",
+                @"C:\whisper\main.exe",
+                Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "whisper-cli.exe"),
+                Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "whisper", "whisper-cli.exe"),
+            };
+
+            foreach (var candidate in candidates)
+            {
+                if (File.Exists(candidate))
+                {
+                    return candidate;
+                }
+            }
+
+            return null;
+        }
+
+        private static string ResolveModelPath(string configured)
+        {
+            if (!string.IsNullOrWhiteSpace(configured) && File.Exists(configured))
+            {
+                return configured;
+            }
+
+            // Standard Whisper models: base (standard), small, medium
+            var candidates = new[]
+            {
+                @"C:\whisper\models\ggml-base.bin",
+                @"C:\whisper\models\ggml-small.bin",
+                @"C:\whisper\models\ggml-medium.bin",
+                @"C:\whisper\ggml-base.bin",
+                Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "models", "ggml-base.bin"),
+                Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ggml-base.bin")
+            };
+
+            foreach (var candidate in candidates)
+            {
+                if (File.Exists(candidate))
+                {
+                    return candidate;
+                }
+            }
+
+            return null;
         }
     }
 }

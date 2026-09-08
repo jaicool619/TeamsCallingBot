@@ -407,6 +407,65 @@ namespace TeamsCallingBot.Video
             return bmp;
         }
 
+        /// <summary>
+        /// Renders a 1280x720 frame that shows an arbitrary content image (chart, TDA answer card,
+        /// snapshot, etc.) with a thin title bar, for the bot's outgoing video tile. This is the
+        /// "share screen to show visualisation" capability (option a - the bot's video tile displays
+        /// content, not a real Teams screen-share) - see BOT_CAPABILITY_EXPECTATIONS.md section 4.
+        /// Off by default; CallHandler only calls this while a visualization is explicitly active,
+        /// and reverts to <see cref="CreateBotStatusCard"/> otherwise.
+        /// </summary>
+        public static Bitmap CreateVisualizationFrame(Bitmap contentImage, string title)
+        {
+            var bmp = new Bitmap(1280, 720, PixelFormat.Format24bppRgb);
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+
+                using (var bgBrush = new SolidBrush(Color.FromArgb(15, 23, 42)))
+                {
+                    g.FillRectangle(bgBrush, 0, 0, 1280, 720);
+                }
+
+                const int titleBarHeight = 56;
+                using (var titleBrush = new SolidBrush(Color.FromArgb(24, 32, 50)))
+                {
+                    g.FillRectangle(titleBrush, 0, 0, 1280, titleBarHeight);
+                }
+
+                using (var titleFont = new Font("Segoe UI", 18, FontStyle.Bold))
+                using (var titleTextBrush = new SolidBrush(Color.White))
+                {
+                    g.DrawString(title ?? "Teams AI Assistant - Visualization", titleFont, titleTextBrush, new PointF(24, 12));
+                }
+
+                if (contentImage != null)
+                {
+                    int areaX = 20;
+                    int areaY = titleBarHeight + 20;
+                    int areaW = 1280 - (areaX * 2);
+                    int areaH = 720 - areaY - 20;
+
+                    float scale = Math.Min((float)areaW / contentImage.Width, (float)areaH / contentImage.Height);
+                    int drawW = Math.Max(1, (int)(contentImage.Width * scale));
+                    int drawH = Math.Max(1, (int)(contentImage.Height * scale));
+                    int drawX = areaX + ((areaW - drawW) / 2);
+                    int drawY = areaY + ((areaH - drawH) / 2);
+
+                    using (var frameBrush = new SolidBrush(Color.White))
+                    {
+                        g.FillRectangle(frameBrush, drawX - 4, drawY - 4, drawW + 8, drawH + 8);
+                    }
+
+                    g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                    g.DrawImage(contentImage, new Rectangle(drawX, drawY, drawW, drawH));
+                }
+            }
+
+            return bmp;
+        }
+
         private static Bitmap GetCardBackground(string botName)
         {
             lock (CardLock)

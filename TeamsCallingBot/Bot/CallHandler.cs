@@ -27,6 +27,7 @@ namespace TeamsCallingBot.Bot
     using TeamsCallingBot.Config;
     using TeamsCallingBot.Mom;
     using TeamsCallingBot.Storage;
+    using TeamsCallingBot.Tda;
     using TeamsCallingBot.Video;
 
     /// <summary>
@@ -59,7 +60,7 @@ namespace TeamsCallingBot.Bot
         public MeetingTimeline Timeline { get; }
 
         // State Flags
-        public bool IsMuted { get; private set; } = false;
+        public bool IsMuted { get; private set; } = true;
         private volatile bool isVideoSendActive = false;
         private int joinWelcomeSent = 0;
         private volatile bool callEstablished = false;
@@ -104,6 +105,13 @@ namespace TeamsCallingBot.Bot
         // Real-Time Voice Speech Recognition
         private readonly RealtimeSpeechRecognizer voiceRecognizer;
 
+        // TDA & Visualization
+        private readonly TdaClient tdaClient;
+        private readonly object visualizationLock = new object();
+        private Bitmap currentVisualization;
+        private string currentVisualizationTitle;
+        private DateTime visualizationExpiresAt = DateTime.MinValue;
+
         public ICall Call { get; }
 
         public CallHandler(ICall call, IGraphLogger logger, string chatThreadId = null, string accessToken = null)
@@ -115,12 +123,16 @@ namespace TeamsCallingBot.Bot
             this.chatThreadId = chatThreadId;
             this.options = BotOptions.Current ?? new BotOptions();
             this.botAccessToken = accessToken ?? this.options.OverrideBearerToken;
+            this.IsMuted = this.options.StartMuted;
 
             // 1. Initialize Disk Storage Manager & Timeline
             this.RecordingsManager = new RecordingsManager(this.Call.Id);
             this.AudioAggregator = new AudioAggregator();
             this.Timeline = new MeetingTimeline { CallId = this.Call.Id, ChatThreadId = chatThreadId, StartedAt = this.sessionStartTime };
             this.chatClient = new BotFrameworkChatClient(this.options.AadAppId, this.options.AadAppSecretOrCertThumbprint, this.options.BotFrameworkServiceUrl, this.graphLogger);
+
+            var tdaTokenProvider = new TdaTokenProvider(this.options.Tda, this.options.AadAppId, this.options.AadAppSecretOrCertThumbprint, this.graphLogger);
+            this.tdaClient = new TdaClient(this.options.Tda, tdaTokenProvider, this.graphLogger);
 
             // 2. Wire Call Events
             this.Call.OnUpdated += this.OnCallUpdated;
@@ -136,9 +148,10 @@ namespace TeamsCallingBot.Bot
                 {
                     this.audioSocket.AudioMediaReceived += this.OnAudioMediaReceived;
                     this.AudioSender = new AudioSender(this.audioSocket, this.graphLogger);
+                    this.AudioSender.IsMuted = this.IsMuted;
 
                     // Play pleasant greeting chime + verbal announcement when audio send is active
-                    if (this.options.SpeakGreetingOnJoin)
+                    if (this.options.SpeakGreetingOnJoin && !this.IsMuted)
                     {
                         _ = Task.Run(async () =>
                         {
@@ -897,7 +910,7 @@ namespace TeamsCallingBot.Bot
                             if (!snapshotSaved)
                             {
                                 snapshotSaved = true;
-                                using (var card = VideoFrameConverter.CreateBotStatusCard("Teams AI Assistant", this.IsMuted ? "Muted" : "Recording audio and video", this.Call.Id, this.IsMuted, tick, this.activityLine))
+                                using (var card = this.RenderCurrentBotFrame(tick))
                                 {
                                     this.RecordingsManager.SavePhoto(card, "05_bot_broadcast_preview");
                                 }
@@ -905,13 +918,7 @@ namespace TeamsCallingBot.Bot
 
                             if (this.isVideoSendActive && bufSize <= maxBufSize)
                             {
-                                using (var card = VideoFrameConverter.CreateBotStatusCard(
-                                    "Teams AI Assistant",
-                                    this.IsMuted ? "Audio output muted - still recording" : "Recording audio and video",
-                                    this.Call.Id,
-                                    this.IsMuted,
-                                    tick,
-                                    this.activityLine))
+                                using (var card = this.RenderCurrentBotFrame(tick))
                                 {
                                     byte[] nv12Bytes = VideoFrameConverter.ConvertBitmapToNV12(card, currentW, currentH);
                                     int slot = tick % poolSize;
@@ -965,6 +972,146 @@ namespace TeamsCallingBot.Bot
             }, token);
 
             this.graphLogger.Info("[Bot Video Streaming] Broadcast loop initialized at 15 FPS.");
+        }
+
+        /// <summary>
+        /// Picks between the normal status card and an active visualization (chart / TDA answer /
+        /// image shown on the bot's own video tile - see ShowVisualization). Caller owns and
+        /// must Dispose the returned Bitmap.
+        /// </summary>
+        private Bitmap RenderCurrentBotFrame(int tick)
+        {
+            Bitmap visualization = null;
+            string title = null;
+            lock (this.visualizationLock)
+            {
+                if (this.currentVisualization != null && DateTime.Now < this.visualizationExpiresAt)
+                {
+                    visualization = this.currentVisualization;
+                    title = this.currentVisualizationTitle;
+                }
+                else if (this.currentVisualization != null)
+                {
+                    // Expired - clear it so subsequent frames fall back to the status card.
+                    this.currentVisualization.Dispose();
+                    this.currentVisualization = null;
+                    this.currentVisualizationTitle = null;
+                }
+            }
+
+            if (visualization != null)
+            {
+                return VideoFrameConverter.CreateVisualizationFrame(visualization, title);
+            }
+
+            return VideoFrameConverter.CreateBotStatusCard(
+                "Teams AI Assistant",
+                this.IsMuted ? "Audio output muted - still recording" : "Recording audio and video",
+                this.Call.Id,
+                this.IsMuted,
+                tick,
+                this.activityLine);
+        }
+
+        /// <summary>
+        /// Shows <paramref name="contentImage"/> on the bot's outgoing video tile for
+        /// <paramref name="durationSeconds"/> seconds (0 or negative = show indefinitely until
+        /// ClearVisualization or a new call to this method). Takes ownership of contentImage (clones
+        /// it internally, caller may dispose its own copy). This is the "share screen to show
+        /// visualisation" capability.
+        /// </summary>
+        public void ShowVisualization(Bitmap contentImage, string title, int durationSeconds)
+        {
+            if (contentImage == null)
+            {
+                return;
+            }
+
+            var clone = (Bitmap)contentImage.Clone();
+            lock (this.visualizationLock)
+            {
+                this.currentVisualization?.Dispose();
+                this.currentVisualization = clone;
+                this.currentVisualizationTitle = title;
+                this.visualizationExpiresAt = durationSeconds > 0
+                    ? DateTime.Now.AddSeconds(durationSeconds)
+                    : DateTime.MaxValue;
+            }
+
+            this.Log($"[Visualization] Showing '{title}' on bot video tile" + (durationSeconds > 0 ? $" for {durationSeconds}s." : " indefinitely."));
+        }
+
+        /// <summary>Reverts the bot's video tile to the normal status card immediately.</summary>
+        public void ClearVisualization()
+        {
+            lock (this.visualizationLock)
+            {
+                this.currentVisualization?.Dispose();
+                this.currentVisualization = null;
+                this.currentVisualizationTitle = null;
+                this.visualizationExpiresAt = DateTime.MinValue;
+            }
+        }
+
+        // ===================================================================
+        // TDA (Tata Steel Digital Assistant) integration - inert unless Bot:Tda:Enabled is true.
+        // See Config/BotOptions.cs (TdaOptions) and Tda/TdaClient.cs.
+        // ===================================================================
+
+        /// <summary>
+        /// Asks TDA <paramref name="query"/> and speaks the answer into the meeting. No-ops (logs and
+        /// returns false) if TDA is not configured/enabled, if AudioSender is unavailable, or if TDA
+        /// returns nothing - never throws into the caller.
+        /// </summary>
+        public async Task<bool> SpeakTdaAnswerAsync(string query)
+        {
+            if (!this.tdaClient.IsConfigured)
+            {
+                this.graphLogger.Warn("[TDA] SpeakTdaAnswerAsync called but TDA is not enabled/configured - no-op.");
+                return false;
+            }
+
+            try
+            {
+                string answer = await this.tdaClient.AskAsync(query).ConfigureAwait(false);
+                if (string.IsNullOrWhiteSpace(answer))
+                {
+                    return false;
+                }
+
+                if (this.AudioSender != null && !this.IsMuted)
+                {
+                    await this.AudioSender.SpeakAsync(answer).ConfigureAwait(false);
+                }
+
+                this.Timeline.AddEvent("tda_answer_spoken", answer);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                this.graphLogger.Warn($"[TDA] SpeakTdaAnswerAsync failed: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>Sends a message to TDA using a token scoped to the "TSL AI" resource. False/no-op if not configured.</summary>
+        public async Task<bool> SendTdaMessageAsync(string message)
+        {
+            if (!this.tdaClient.IsConfigured)
+            {
+                this.graphLogger.Warn("[TDA] SendTdaMessageAsync called but TDA is not enabled/configured - no-op.");
+                return false;
+            }
+
+            try
+            {
+                return await this.tdaClient.SendMessageAsync(message).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                this.graphLogger.Warn($"[TDA] SendTdaMessageAsync failed: {ex.Message}");
+                return false;
+            }
         }
 
         // ===================================================================
@@ -1562,7 +1709,7 @@ namespace TeamsCallingBot.Bot
                 await this.PostTextMessageToChatAsync(chatReply).ConfigureAwait(false);
             });
 
-            if (this.AudioSender != null && this.AudioSender.IsAudioSendActive)
+            if (this.AudioSender != null && this.AudioSender.IsAudioSendActive && !this.IsMuted)
             {
                 _ = this.AudioSender.SpeakAsync(voiceReply);
             }
@@ -1570,10 +1717,10 @@ namespace TeamsCallingBot.Bot
 
         private void OnVoiceTriggerDetected(string triggerText, string voiceReply, string chatReply)
         {
-            this.graphLogger?.Info($"[Voice Trigger] Heard: \"{triggerText}\" -> Speaking aloud: \"{voiceReply}\"");
-            Console.WriteLine($">>> [Voice Trigger] Heard: \"{triggerText}\" -> Speaking aloud: \"{voiceReply}\"");
+            this.graphLogger?.Info($"[Voice Trigger] Heard: \"{triggerText}\" -> (Muted: {this.IsMuted}) Reply: \"{voiceReply}\"");
+            Console.WriteLine($">>> [Voice Trigger] Heard: \"{triggerText}\" -> (Muted: {this.IsMuted})");
 
-            if (this.AudioSender != null)
+            if (this.AudioSender != null && !this.IsMuted)
             {
                 _ = this.AudioSender.SpeakAsync(voiceReply);
             }
@@ -1802,6 +1949,11 @@ namespace TeamsCallingBot.Bot
 
             this.chatClient?.Dispose();
             this.latestScreenBitmap?.Dispose();
+            lock (this.visualizationLock)
+            {
+                this.currentVisualization?.Dispose();
+                this.currentVisualization = null;
+            }
         }
     }
 }

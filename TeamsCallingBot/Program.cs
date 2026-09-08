@@ -1,6 +1,7 @@
 namespace TeamsCallingBot
 {
     using System;
+    using System.Collections.Generic;
     using System.Linq;
     using System.Security.Cryptography.X509Certificates;
     using System.Threading.Tasks;
@@ -36,23 +37,57 @@ namespace TeamsCallingBot
                 await Task.Delay(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
 
                 var config = host.Services.GetRequiredService<IConfiguration>();
-                var testUrl = config["Bot:TestMeetingJoinUrl"];
-                if (string.IsNullOrWhiteSpace(testUrl))
+                var testUrls = config.GetSection("Bot:TestMeetingJoinUrls").Get<List<string>>() ?? new List<string>();
+                var singleUrl = config["Bot:TestMeetingJoinUrl"];
+                if (!string.IsNullOrWhiteSpace(singleUrl) && !testUrls.Contains(singleUrl))
+                {
+                    testUrls.Insert(0, singleUrl);
+                }
+
+                var activeUrls = testUrls
+                    .Where(u => !string.IsNullOrWhiteSpace(u) && !u.Contains("PLACEHOLDER") && u.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                    .Take(5)
+                    .ToList();
+
+                if (activeUrls.Count == 0)
                 {
                     return;
                 }
 
-                Console.WriteLine($">>> TEST JOIN starting for: {testUrl}");
-                try
+                var bot = host.Services.GetRequiredService<TeamsCallingBot.Bot.Bot>();
+
+                if (activeUrls.Count == 1)
                 {
-                    var bot = host.Services.GetRequiredService<TeamsCallingBot.Bot.Bot>();
-                    var call = await bot.JoinCallAsync(testUrl).ConfigureAwait(false);
-                    Console.WriteLine($">>> TEST JOIN accepted. Call id: {call.Id}");
+                    Console.WriteLine($">>> [Single-Call Test] Joining meeting: {activeUrls[0]}");
+                    try
+                    {
+                        var call = await bot.JoinCallAsync(activeUrls[0]).ConfigureAwait(false);
+                        Console.WriteLine($">>> [Single-Call Test] Joined successfully. Call id: {call.Id}");
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($">>> [Single-Call Test] Join failed: {ex.GetType().Name}: {ex.Message}");
+                    }
                 }
-                catch (Exception ex)
+                else
                 {
-                    Console.WriteLine($">>> TEST JOIN FAILED: {ex.GetType().Name}: {ex.Message}");
-                    Console.WriteLine(ex.ToString());
+                    Console.WriteLine($">>> [Multi-Call Test] Launching {activeUrls.Count} simultaneous meeting join(s) (Capacity: up to 5)...");
+                    var joinTasks = activeUrls.Select(async (url, idx) =>
+                    {
+                        int meetingIndex = idx + 1;
+                        try
+                        {
+                            Console.WriteLine($">>> [Meeting #{meetingIndex}/{activeUrls.Count}] Joining: {url}");
+                            var call = await bot.JoinCallAsync(url).ConfigureAwait(false);
+                            Console.WriteLine($">>> [Meeting #{meetingIndex}/{activeUrls.Count}] Successfully joined! Call ID: {call.Id}");
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($">>> [Meeting #{meetingIndex}/{activeUrls.Count}] Join failed: {ex.GetType().Name}: {ex.Message}");
+                        }
+                    });
+
+                    await Task.WhenAll(joinTasks).ConfigureAwait(false);
                 }
             });
 
