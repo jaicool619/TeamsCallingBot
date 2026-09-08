@@ -76,8 +76,8 @@ namespace TeamsCallingBot.Bot
 
         // Auto-Leave Timer
         private CancellationTokenSource autoLeaveCts;
-        private const int AutoLeaveDebounceSeconds = 30;
-        private const int InitialGracePeriodSeconds = 45;
+        private const int AutoLeaveDebounceSeconds = 120;
+        private const int InitialGracePeriodSeconds = 300;
 
         // Chat Info
         private readonly string chatThreadId;

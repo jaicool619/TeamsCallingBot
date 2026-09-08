@@ -62,6 +62,10 @@ namespace TeamsCallingBot.Config
         /// </summary>
         public int MaxConcurrentCalls { get; set; } = 3;
 
+        public string TestMeetingJoinUrl { get; set; }
+
+        public System.Collections.Generic.List<string> TestMeetingJoinUrls { get; set; } = new System.Collections.Generic.List<string>();
+
         /// <summary>
         /// Where TranscriptSaver writes the two transcript files. Point this at wherever
         /// Google Drive for Desktop's synced folder lives on the VM (set up once, interactively,
