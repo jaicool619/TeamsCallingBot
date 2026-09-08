@@ -2,6 +2,7 @@ namespace TeamsCallingBot
 {
     using System;
     using System.Collections.Generic;
+    using System.IO;
     using System.Linq;
     using System.Security.Cryptography.X509Certificates;
     using System.Threading.Tasks;
@@ -96,30 +97,32 @@ namespace TeamsCallingBot
 
         public static IWebHost BuildWebHost(string[] args)
         {
-            var config = new ConfigurationBuilder()
-                .AddJsonFile("appsettings.json", optional: false)
-                .AddEnvironmentVariables()
-                .Build();
-
-            var thumbprint = config["Bot:CertificateThumbprint"];
-            var cert = LoadCertificateByThumbprint(thumbprint);
+            var basePath = Directory.GetCurrentDirectory();
+            if (!File.Exists(Path.Combine(basePath, "appsettings.json")))
+            {
+                var appBase = AppDomain.CurrentDomain.BaseDirectory;
+                if (File.Exists(Path.Combine(appBase, "appsettings.json")))
+                {
+                    basePath = appBase;
+                }
+            }
 
             return WebHost.CreateDefaultBuilder(args)
-                .UseStartup<Startup>()
-                .UseKestrel(options =>
+                .UseContentRoot(basePath)
+                .ConfigureAppConfiguration((hostingContext, config) =>
                 {
-                    // RESOLVED: Kestrel needs its own certificate to terminate TLS for this HTTPS
-                    // listener - UseUrls("https://...") alone falls back to the untrusted ASP.NET Core
-                    // dev cert, which Graph's webhook caller rejects (this was the IOException/
-                    // Win32Exception "decryption operation failed" seen when Graph tried to call back).
-                    // Same win-acme cert (by thumbprint) used for MediaPlatformInstanceSettings in Bot.cs
-                    // is reused here so both the media handshake and this webhook listener agree.
-                    // Deliberately just ConfigureHttpsDefaults (not an explicit options.Listen) so the
-                    // single https://0.0.0.0:443 endpoint below (UseUrls) is the only port 443 binding -
-                    // adding a second explicit Listen for the same port would throw "address in use".
+                    config.SetBasePath(basePath);
+                    config.AddJsonFile("appsettings.json", optional: false, reloadOnChange: true);
+                    config.AddEnvironmentVariables();
+                })
+                .UseStartup<Startup>()
+                .UseKestrel((context, options) =>
+                {
+                    var thumbprint = context.Configuration["Bot:CertificateThumbprint"];
+                    var cert = LoadCertificateByThumbprint(thumbprint);
                     options.ConfigureHttpsDefaults(https => https.ServerCertificate = cert);
                 })
-                .UseUrls("https://0.0.0.0:443") // matches appsettings.json's Bot:InstancePublicPort - keep these in sync manually
+                .UseUrls("https://0.0.0.0:443")
                 .Build();
         }
 

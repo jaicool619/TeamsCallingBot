@@ -324,8 +324,12 @@ namespace TeamsCallingBot.Video
         /// </summary>
         public static Bitmap CreateBotStatusCard(string botName, string statusMessage, string meetingId, bool isMuted = false, int tick = 0, string activityLine = null)
         {
-            Bitmap background = GetCardBackground(botName ?? "Teams AI Assistant");
-            var bmp = (Bitmap)background.Clone();
+            Bitmap bmp;
+            lock (CardLock)
+            {
+                Bitmap background = GetCardBackground(botName ?? "Teams AI Assistant");
+                bmp = (Bitmap)background.Clone();
+            }
 
             using (var g = Graphics.FromImage(bmp))
             {

@@ -164,6 +164,25 @@ namespace TeamsCallingBot.Common
         /// </summary>
         private static string UnwrapLauncherUrl(string joinURL)
         {
+            // Support browser URLs from Teams Web (e.g. teams.microsoft.com/light-meetings/launch?coords=...)
+            var coordsMatch = Regex.Match(joinURL, "[?&]coords=(?<coords>[^&]+)", RegexOptions.IgnoreCase);
+            if (coordsMatch.Success)
+            {
+                try
+                {
+                    string rawBase64 = WebUtility.UrlDecode(coordsMatch.Groups["coords"].Value);
+                    rawBase64 = rawBase64.PadRight(rawBase64.Length + (4 - rawBase64.Length % 4) % 4, '=');
+                    byte[] bytes = Convert.FromBase64String(rawBase64);
+                    string json = System.Text.Encoding.UTF8.GetString(bytes);
+                    string meetingUrl = ExtractJsonStringValue(json, "meetingUrl");
+                    if (!string.IsNullOrWhiteSpace(meetingUrl))
+                    {
+                        return meetingUrl;
+                    }
+                }
+                catch { }
+            }
+
             var match = Regex.Match(joinURL, "[?&]url=(?<inner>[^&]+)");
             if (!match.Success)
             {
@@ -171,7 +190,9 @@ namespace TeamsCallingBot.Common
             }
 
             var innerDecodedOnce = WebUtility.UrlDecode(match.Groups["inner"].Value);
-            return "https://teams.microsoft.com" + innerDecodedOnce;
+            return innerDecodedOnce.StartsWith("http", StringComparison.OrdinalIgnoreCase)
+                ? innerDecodedOnce
+                : "https://teams.microsoft.com" + innerDecodedOnce;
         }
 
         /// <summary>
